@@ -9,7 +9,7 @@ class DownloadImages(BaseCase):
         if self._multithreaded:
             self.open_if_not_url("about:blank")
             self.skip("Skipping test in multi-threaded mode.")
-        self.open("seleniumbase.io/examples/chart_maker/ReadMe")
+        self.open("https://www.avto.net/Ads/details.asp?id=19538828&display=%8Akoda%20Superb")
         img_elements_with_src = self.find_elements("img[src]")
         unique_src_values = []
         for img in img_elements_with_src:
