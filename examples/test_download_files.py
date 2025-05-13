@@ -31,7 +31,7 @@ class DownloadTests(BaseCase):
         self.assert_text("Download files", "a#files-tab")
         pkg_header = self.get_text("h1.package-header__name").strip()
         pkg_name = pkg_header.replace(" ", "-")
-        whl_file = pkg_name + "-py2.py3-none-any.whl"
+        whl_file = pkg_name + "-py3-none-any.whl"
         tar_gz_file = pkg_name + ".tar.gz"
 
         # Click the links to download the files into: "./downloaded_files/"
@@ -52,9 +52,9 @@ class DownloadTests(BaseCase):
             self.download_file(whl_href)
             self.download_file(tar_href)
         else:
-            self.click(whl_selector)  # Download the "whl" file
+            self.js_click(whl_selector)  # Download the "whl" file
             self.sleep(0.1)
-            self.click(tar_selector)  # Download the "tar" file
+            self.js_click(tar_selector)  # Download the "tar" file
 
         # Verify that the downloaded files appear in the [Downloads Folder]
         # (This only guarantees that the exact file name is in the folder.)

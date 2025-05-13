@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import io
 import logging
 import os
@@ -8,6 +7,9 @@ import string
 import sys
 import time
 import zipfile
+from contextlib import suppress
+from seleniumbase.console_scripts import sb_install
+from seleniumbase.fixtures import shared_utils
 
 logger = logging.getLogger(__name__)
 IS_POSIX = sys.platform.startswith(("darwin", "cygwin", "linux"))
@@ -53,10 +55,8 @@ class Patcher(object):
         self.executable_path = None
         prefix = "undetected"
         if not os.path.exists(self.data_path):
-            try:
+            with suppress(Exception):
                 os.makedirs(self.data_path, exist_ok=True)
-            except Exception:
-                pass
         if not executable_path:
             self.executable_path = os.path.join(
                 self.data_path, "_".join([prefix, self.exe_name])
@@ -108,7 +108,14 @@ class Patcher(object):
         release = self.fetch_release_number()
         self.version_main = release.split(".")[0]
         self.version_full = release
-        self.unzip_package(self.fetch_package())
+        if int(self.version_main) < 115:
+            self.unzip_package(self.fetch_package())
+        else:
+            sb_install.main(
+                override="chromedriver %s" % self.version_main,
+                intel_for_uc=shared_utils.is_arm_mac(),
+                force_uc=True,
+            )
         return self.patch()
 
     def patch(self):
@@ -123,6 +130,12 @@ class Patcher(object):
             path += "_%s" % self.version_main
         path = path.upper()
         logger.debug("Getting release number from %s" % path)
+        if self.version_main and int(self.version_main) > 114:
+            return (
+                sb_install.get_cft_latest_version_from_milestone(
+                    str(self.version_main)
+                )
+            )
         return urlopen(self.url_repo + path).read().decode()
 
     def fetch_package(self):
@@ -166,9 +179,9 @@ class Patcher(object):
 
     @staticmethod
     def force_kill_instances(exe_name):
-        """ Terminate instances of UC.
-        :param: executable name to kill, may be a path as well
-        :return: True on success else False """
+        """Terminate instances of UC.
+        :param: Executable name to kill. (Can be a path)
+        :return: True on success else False."""
         exe_name = os.path.basename(exe_name)
         if IS_POSIX:
             r = os.system("kill -f -9 $(pidof %s)" % exe_name)
@@ -189,7 +202,7 @@ class Patcher(object):
         with io.open(executable_path, "rb") as fh:
             if re.search(
                 b"window.cdc_adoQpoasnfa76pfcZLmcfl_"
-                b"(Array|Promise|Symbol|Object|Proxy|JSON)",
+                b"(Array|Promise|Symbol|Object|Proxy|JSON|Window)",
                 fh.read()
             ):
                 return False
@@ -212,14 +225,14 @@ class Patcher(object):
             file_bin = fh.read()
             file_bin = re.sub(
                 b"window\\.cdc_[a-zA-Z0-9]{22}_"
-                b"(Array|Promise|Symbol|Object|Proxy|JSON)"
-                b" = window\\.(Array|Promise|Symbol|Object|Proxy|JSON);",
+                b"(Array|Promise|Symbol|Object|Proxy|JSON|Window) "
+                b"= window\\.(Array|Promise|Symbol|Object|Proxy|JSON|Window);",
                 gen_js_whitespaces,
                 file_bin,
             )
             file_bin = re.sub(
                 b"window\\.cdc_[a-zA-Z0-9]{22}_"
-                b"(Array|Promise|Symbol|Object|Proxy|JSON) \\|\\|",
+                b"(Array|Promise|Symbol|Object|Proxy|JSON|Window) \\|\\|",
                 gen_js_whitespaces,
                 file_bin,
             )
@@ -275,8 +288,8 @@ class Patcher(object):
 
     def __del__(self):
         if self._custom_exe_path:
-            # if the driver binary is specified by user
-            # we assume it is important enough to not delete it
+            # If the driver binary is specified by the user,
+            # then assume it is important enough to keep it.
             return
         else:
             timeout = 3

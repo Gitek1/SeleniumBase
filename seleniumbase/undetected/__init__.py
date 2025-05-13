@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 import logging
 import os
 import re
@@ -10,6 +9,7 @@ import selenium.webdriver.chrome.service
 import selenium.webdriver.chrome.webdriver
 import selenium.webdriver.common.service
 import selenium.webdriver.remote.command
+from contextlib import suppress
 from .cdp import CDP
 from .cdp import PageElement
 from .dprocess import start_detached
@@ -25,6 +25,7 @@ __all__ = (
     "CDP",
     "find_chrome_executable",
 )
+IS_MAC = "darwin" in sys.platform
 IS_POSIX = sys.platform.startswith(("darwin", "cygwin", "linux"))
 logger = logging.getLogger("uc")
 logger.setLevel(logging.getLogger().getEffectiveLevel())
@@ -132,8 +133,11 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
             options = ChromeOptions()
         try:
             if hasattr(options, "_session") and options._session is not None:
-                # Prevent reuse of options
-                raise RuntimeError("You cannot reuse the ChromeOptions object")
+                # Prevent reuse of options.
+                # (Probably a port overlap. Quit existing driver and continue.)
+                logger.debug("You cannot reuse the ChromeOptions object")
+                with suppress(Exception):
+                    options._session.quit()
         except AttributeError:
             pass
         options._session = self
@@ -201,11 +205,9 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
                 # Create a temporary folder for the user-data profile.
                 options.add_argument(arg)
         if not language:
-            try:
+            with suppress(Exception):
                 import locale
                 language = locale.getlocale()[0].replace("_", "-")
-            except Exception:
-                pass
             if (
                 not language
                 or "English" in language
@@ -234,6 +236,7 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
                     "--no-first-run",
                     "--no-service-autorun",
                     "--password-store=basic",
+                    "--profile-directory=Default",
                 ]
             )
         options.add_argument(
@@ -242,7 +245,7 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
         )
         if hasattr(options, 'handle_prefs'):
             options.handle_prefs(user_data_dir)
-        try:
+        with suppress(Exception):
             import json
             with open(
                 os.path.join(
@@ -263,8 +266,6 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
                 fs.seek(0, 0)
                 fs.truncate()
                 json.dump(config, fs)
-        except Exception:
-            pass
         creationflags = 0
         if "win32" in sys.platform:
             creationflags = subprocess.CREATE_NO_WINDOW
@@ -278,19 +279,21 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
                     options.binary_location, *options.arguments
                 )
             else:
-                browser = subprocess.Popen(
-                    [options.binary_location, *options.arguments],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    close_fds=IS_POSIX,
-                    creationflags=creationflags,
+                gui_lock = fasteners.InterProcessLock(
+                    constants.MultiBrowser.PYAUTOGUILOCK
                 )
-                self.browser_pid = browser.pid
+                with gui_lock:
+                    browser = subprocess.Popen(
+                        [options.binary_location, *options.arguments],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        close_fds=IS_POSIX,
+                        creationflags=creationflags,
+                    )
+                    self.browser_pid = browser.pid
             service_ = None
             log_output = subprocess.PIPE
-            if sys.version_info < (3, 8):
-                log_output = os.devnull
             if patch_driver:
                 service_ = selenium.webdriver.chrome.service.Service(
                     executable_path=self.patcher.executable_path,
@@ -309,7 +312,21 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
                 setattr(service_, "creationflags", creationflags)
             if hasattr(service_, "creation_flags"):
                 setattr(service_, "creation_flags", creationflags)
-            super().__init__(options=options, service=service_)
+            try:
+                super().__init__(options=options, service=service_)
+            except OSError as e:
+                if IS_MAC and "Bad CPU type in executable" in str(e):
+                    print(str(e))
+                    message = (
+                        "Missing a macOS dependency:\n"
+                        "Your Mac needs Rosetta 2 to use UC Mode!\n"
+                        'Run: "softwareupdate --install-rosetta"\n'
+                        "Info: "
+                        "https://apple.stackexchange.com/a/408379/607628"
+                    )
+                    raise Exception(message)
+                else:
+                    raise
             self.reactor = None
             if enable_cdp_events:
                 if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
@@ -338,7 +355,7 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
 
     def _get_cdc_props(self):
         cdc_props = []
-        try:
+        with suppress(Exception):
             cdc_props = self.execute_script(
                 """
                 let objectToInspect = window,
@@ -351,8 +368,6 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
                 return result.filter(i => i.match(/^[a-z]{3}_[a-z]{22}_.*/i))
                 """
             )
-        except Exception:
-            pass
         return cdc_props
 
     def _hook_remove_cdc_props(self, cdc_props):
@@ -423,46 +438,78 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
         - Starts the chromedriver service that runs in the background.
         - Recreates the session."""
         if hasattr(self, "service"):
-            try:
-                self.service.stop()
-            except Exception:
-                pass
+            with suppress(Exception):
+                if self.service.is_connectable():
+                    self.stop_client()
+                    self.service.stop()
             if isinstance(timeout, str):
                 if timeout.lower() == "breakpoint":
                     breakpoint()  # To continue:
                     pass  # Type "c" & press ENTER!
             else:
                 time.sleep(timeout)
-            try:
+            with suppress(Exception):
                 self.service.start()
-            except Exception:
-                pass
-        try:
+        with suppress(Exception):
             self.start_session()
-        except Exception:
-            pass
+            time.sleep(0.0075)
+        with suppress(Exception):
+            for window_handle in self.window_handles:
+                self.switch_to.window(window_handle)
+                if self.current_url.startswith(
+                    "chrome-extension://"
+                ):
+                    # https://issues.chromium.org/issues/396611138
+                    # (Uncomment below when resolved)
+                    # self.close()
+                    if self.service.is_connectable():
+                        self.stop_client()
+                        self.service.stop()
+                    self.service.start()
+                    self.start_session()
+                    time.sleep(0.003)
+        with suppress(Exception):
+            self.switch_to.window(self.window_handles[-1])
+        self._is_connected = True
 
     def disconnect(self):
         """Stops the chromedriver service that runs in the background.
         To use driver methods again, you MUST call driver.connect()"""
         if hasattr(self, "service"):
-            try:
-                self.service.stop()
-            except Exception:
-                pass
+            with suppress(Exception):
+                if self.service.is_connectable():
+                    self.stop_client()
+                    time.sleep(0.003)
+                    self.service.stop()
+        self._is_connected = False
 
     def connect(self):
         """Starts the chromedriver service that runs in the background
         and recreates the session."""
         if hasattr(self, "service"):
-            try:
+            with suppress(Exception):
                 self.service.start()
-            except Exception:
-                pass
-        try:
+        with suppress(Exception):
             self.start_session()
-        except Exception:
-            pass
+            time.sleep(0.0075)
+        with suppress(Exception):
+            for window_handle in self.window_handles:
+                self.switch_to.window(window_handle)
+                if self.current_url.startswith(
+                    "chrome-extension://"
+                ):
+                    # https://issues.chromium.org/issues/396611138
+                    # (Uncomment below when resolved)
+                    # self.close()
+                    if self.service.is_connectable():
+                        self.stop_client()
+                        self.service.stop()
+                    self.service.start()
+                    self.start_session()
+                    time.sleep(0.003)
+        with suppress(Exception):
+            self.switch_to.window(self.window_handles[-1])
+        self._is_connected = True
 
     def start_session(self, capabilities=None):
         if not capabilities:
@@ -486,13 +533,13 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
             pass
         if hasattr(self, "service") and getattr(self.service, "process", None):
             logger.debug("Stopping webdriver service")
-            self.service.stop()
-        try:
+            with suppress(Exception):
+                self.stop_client()
+                self.service.stop()
+        with suppress(Exception):
             if self.reactor and isinstance(self.reactor, Reactor):
                 logger.debug("Shutting down Reactor")
                 self.reactor.event.set()
-        except Exception:
-            pass
         if (
             hasattr(self, "keep_user_data_dir")
             and hasattr(self, "user_data_dir")
@@ -521,18 +568,14 @@ class Chrome(selenium.webdriver.chrome.webdriver.WebDriver):
         self.patcher = None
 
     def __del__(self):
-        try:
+        with suppress(Exception):
             if "win32" in sys.platform:
                 self.stop_client()
                 self.command_executor.close()
             else:
                 super().quit()
-        except Exception:
-            pass
-        try:
+        with suppress(Exception):
             self.quit()
-        except Exception:
-            pass
 
     def __enter__(self):
         return self
@@ -554,14 +597,14 @@ def find_chrome_executable():
     if IS_POSIX:
         for item in os.environ.get("PATH").split(os.pathsep):
             for subitem in (
-                "chromium",
                 "google-chrome",
-                "chromium-browser",
-                "chrome",
                 "google-chrome-stable",
                 "google-chrome-beta",
                 "google-chrome-dev",
                 "google-chrome-unstable",
+                "chrome",
+                "chromium",
+                "chromium-browser",
             ):
                 candidates.add(os.sep.join((item, subitem)))
         if "darwin" in sys.platform:
